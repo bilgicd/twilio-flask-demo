@@ -1,9 +1,8 @@
-from flask import Flask, request, redirect
+from flask import Flask, request, session
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
-import openai
-import json
-import base64
+from openai import OpenAI
+import json, base64, os
 
 # -------------------------
 # Menu & config
@@ -18,133 +17,162 @@ menu = {
 }
 
 app = Flask(__name__)
+app.secret_key = "mysuperlongrandomsecretkey123456789"
 
-FROM_NUMBER = 'whatsapp:+14155238886'  # Twilio sandbox WhatsApp number
-TO_NUMBER = 'whatsapp:+447425766000'   # Your WhatsApp number
+FROM_NUMBER = 'whatsapp:+14155238886'
+TO_NUMBER = 'whatsapp:+447425766000'
 
 # Twilio client
-client = Client('AC717f3075970887837f943d9717f16558', '414da7e86d4e46fee2f9008bc5ba4920')
-
-# OpenAI API key (base64 encoded)
-OPENAI_KEY_B64 = "c2stcHJvai1DNXBndFBmaE1IMEtFb0dRMnk3M0dpYUpVQ3FmNE9MODJDcW1GdXdiMGM1NDVZcEMyVllCdXNQODdBWkdzZWYxSXhWUTJmdkpNQVQzQmxia0ZKZ2xYendDQUVtaEVJX29iQk43VkpQanM5TUdYSWRtY3BYcDRKTG5qNjM5aW1xT1lGd0p6Y0tJbUxhdnJrNHl6dHBSSERPbWZoVUE="
-openai.api_key = base64.b64decode(OPENAI_KEY_B64).decode()
+client = Client(
+    'AC717f3075970887837f943d9717f16558',
+    '414da7e86d4e46fee2f9008bc5ba4920'
+)
 
 # -------------------------
-# Helper functions
+# OpenAI Setup
 # -------------------------
-def send_whatsapp(message_text):
-    """Send WhatsApp message via Twilio"""
+OPENAI_KEY_B64 = "c2stYWRtaW4tMkM5TXZMdENvMG5Ebm9ydHlkcWpjTHhleS01VzJISjRLMldYaTRtc09pby1LbU1RbFlvS1VWaXVMZFQzQmxua0ZKdDBsU0xCMGl1VGdNY0R6MGE0X3F1cWFKYW5yVjlBYzdIQ3hHMnNrRk5fcWVvX3RFLVNudnBnMlFBCg=="
+
+OPENAI_KEY = base64.b64decode(OPENAI_KEY_B64).decode()
+
+openai_client = OpenAI(api_key=OPENAI_KEY)
+
+
+# -------------------------
+# Helpers
+# -------------------------
+def send_whatsapp(text):
     msg = client.messages.create(
         from_=FROM_NUMBER,
-        body=message_text,
+        body=text,
         to=TO_NUMBER
     )
     print("WhatsApp sent:", msg.sid)
 
-def ai_parse_order(speech_text, menu):
-    """
-    Send speech to OpenAI to extract structured order data.
-    Returns dict with 'items' and 'total'.
-    """
-    menu_items = ', '.join(menu.keys())
+
+def ai_parse_order(speech_text):
+    """Send order text to OpenAI for parsing."""
     prompt = f"""
-You are a restaurant assistant. The menu is: {menu_items}.
-Parse the following customer order into JSON with "name" and "quantity" for each item.
-Ignore items not on the menu. Calculate the total price using these menu prices.
-Respond ONLY with JSON. If the customer says "large fries" or "big fries", treat it as "large fries".
+You are a restaurant assistant. The menu is: {list(menu.keys())}.
+Parse the customer's speech into JSON with fields:
+
+items: [
+  {{ "name": string, "quantity": number }}
+]
+total: number
+
+Rules:
+- Ignore items not on the menu.
+- "large fries" or "big fries" → "large fries".
+- Use these exact menu prices: {json.dumps(menu)}
+- If nothing is ordered, return items=[] and total=0.
+- Respond ONLY with JSON.
 
 Customer said: "{speech_text}"
-Menu prices: {json.dumps(menu)}
 """
 
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
-
     try:
-        parsed = json.loads(response['choices'][0]['message']['content'].strip())
-        return parsed
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+
+        data = completion.choices[0].message.content.strip()
+        return json.loads(data)
+
     except Exception as e:
-        print("Error parsing AI output:", e)
+        print("OpenAI error:", e)
         return {"items": [], "total": 0.0}
 
+
 # -------------------------
-# Flask routes
+# Flask Routes
 # -------------------------
 
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
     resp = VoiceResponse()
     gather = Gather(
-        input='speech',
-        action='/process_order',
-        method='POST',
-        timeout=12  # increased to capture full sentences
+        input="speech",
+        action="/process_order",
+        method="POST",
+        timeout=8
     )
     gather.say("Welcome to Baguette de Moet Andover. What would you like to order?")
     resp.append(gather)
-    resp.say("Sorry, we did not receive any input. Please call again to place an order.")
+    resp.say("We did not receive any speech. Goodbye.")
     return str(resp)
+
 
 @app.route("/process_order", methods=["POST"])
 def process_order():
     resp = VoiceResponse()
-    speech_text = request.form.get('SpeechResult', '')
+    speech_text = request.form.get("SpeechResult", "")
 
     if not speech_text:
-        resp.say("Sorry, we did not understand your order.")
+        resp.say("Sorry, I did not understand.")
         return str(resp)
 
-    ai_order = ai_parse_order(speech_text, menu)
+    # Parse via OpenAI
+    ai_order = ai_parse_order(speech_text)
 
     if not ai_order["items"]:
-        resp.say("Sorry, we could not find any items from your order in our menu.")
+        resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
-    # Create order summary text
-    order_summary = ', '.join([f"{item['quantity']} x {item['name']}" for item in ai_order["items"]])
-    total = ai_order['total']
+    # Save order in session for confirmation call
+    session["order"] = ai_order
+    session["speech_text"] = speech_text
 
-    # Ask caller to confirm order
+    # Build summary
+    summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
+    total = ai_order["total"]
+
     gather = Gather(
-        input='speech',
-        action='/confirm_order',
-        method='POST',
+        input="speech",
+        action="/confirm_order",
+        method="POST",
         timeout=5
     )
-    gather.say(f"You ordered {order_summary}. The total is £{total:.2f}. Say yes to confirm or no to cancel.")
+    gather.say(f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.")
     resp.append(gather)
-    resp.say("We did not receive a confirmation. Please call again to place an order.")
+
+    resp.say("No confirmation received. Goodbye.")
     return str(resp)
+
 
 @app.route("/confirm_order", methods=["POST"])
 def confirm_order():
     resp = VoiceResponse()
-    confirmation = request.form.get('SpeechResult', '').lower()
-    
-    if confirmation in ['yes', 'yeah', 'yep', 'confirm']:
-        # Retrieve last AI order (for simplicity, you could store it in session/db)
-        speech_text = request.form.get('SpeechResult', '')
-        ai_order = ai_parse_order(speech_text, menu)  # optional, re-parse to get items
-        order_summary = ', '.join([f"{item['quantity']} x {item['name']}" for item in ai_order["items"]])
-        total = ai_order['total']
+    confirmation = request.form.get("SpeechResult", "").lower()
 
-        whatsapp_message = f"New Order: {order_summary}. Total: £{total:.2f}. Customer said: {speech_text}"
-        send_whatsapp(whatsapp_message)
+    if confirmation in ["yes", "yeah", "yep", "confirm"]:
+        # Retrieve saved order
+        ai_order = session.get("order")
+        speech_text = session.get("speech_text")
 
-        resp.say(f"Thank you! Your order of {order_summary} totaling £{total:.2f} has been sent to the kitchen.")
+        if not ai_order:
+            resp.say("Sorry, we lost the order information.")
+            return str(resp)
+
+        summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
+        total = ai_order["total"]
+
+        # Send WhatsApp
+        msg = f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}"
+        send_whatsapp(msg)
+
+        resp.say(f"Thank you! Your order of {summary} totaling £{total:.2f} has been sent to the kitchen.")
     else:
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
-    
+
     return str(resp)
 
-# -------------------------
-# Run app
-# -------------------------
-import os
 
+# -------------------------
+# Run
+# -------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
