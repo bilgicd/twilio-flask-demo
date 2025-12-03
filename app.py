@@ -1,9 +1,18 @@
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
-from menu import menu
 import openai
 import json
+
+menu = {
+    "tuna baguette": 4.99,
+    "fries": 2.50,
+    "large fries": 3.00,
+    "coke": 1.20,
+    "fanta": 1.20,
+    "chicken baguette": 5.99
+}
+
 
 app = Flask(__name__)
 
