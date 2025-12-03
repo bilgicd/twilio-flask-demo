@@ -83,7 +83,7 @@ def voice():
         input='speech',
         action='/process_order',
         method='POST',
-        timeout=5
+        timeout=10
     )
     gather.say("Welcome to Baguette de Moet Andover. What would you like to order?")
     resp.append(gather)
