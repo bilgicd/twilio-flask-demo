@@ -4,6 +4,9 @@ from twilio.rest import Client
 from openai import OpenAI
 import json, base64, os
 
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
 # -------------------------
 # Menu & config
 # -------------------------
@@ -28,14 +31,6 @@ client = Client(
     '414da7e86d4e46fee2f9008bc5ba4920'
 )
 
-# -------------------------
-# OpenAI Setup
-# -------------------------
-OPENAI_KEY_B64 = "c2stYWRtaW4tMkM5TXZMdENvMG5Ebm9ydHlkcWpjTHhleS01VzJISjRLMldYaTRtc09pby1LbU1RbFlvS1VWaXVMZFQzQmxua0ZKdDBsU0xCMGl1VGdNY0R6MGE0X3F1cWFKYW5yVjlBYzdIQ3hHMnNrRk5fcWVvX3RFLVNudnBnMlFBCg=="
-
-OPENAI_KEY = base64.b64decode(OPENAI_KEY_B64).decode()
-
-openai_client = OpenAI(api_key=OPENAI_KEY)
 
 
 # -------------------------
