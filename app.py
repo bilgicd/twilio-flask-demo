@@ -73,7 +73,7 @@ Customer said: "{speech_text}"
 
     try:
         completion = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
