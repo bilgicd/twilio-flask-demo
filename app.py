@@ -69,7 +69,7 @@ Customer said: "{speech_text}"
 
     try:
         completion = openai_client.responses.create(
-            model="gpt-4o-mini"
+            model="gpt-4o-mini",
             input=[{"role": "user", "content": prompt}]
         )
 
