@@ -152,7 +152,7 @@ Customer said: "{speech_text}"
 def voice():
     logger.debug("DEBUG: /voice hit")
     resp = VoiceResponse()
-    gather = Gather(input="speech", action="/process_order", method="POST", timeout=8)
+    gather = Gather(input="speech", action="/process_order", method="POST", timeout=4)
     gather.say("Welcome to Baguette de Moet Andover. What would you like to order?")
     resp.append(gather)
     resp.say("We did not receive any speech. Goodbye.")
