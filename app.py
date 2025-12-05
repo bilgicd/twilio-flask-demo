@@ -130,143 +130,70 @@ def extract_text_from_response(resp) -> str:
 # ---------------------------
 # AI parse order
 # ---------------------------
-def ai_parse_order(speech_text: str):
-    """
-    Send prompt to OpenAI Responses API and return a dict like:
-    {"items": [{"name": "...", "quantity": N}], "total": X}
-    Always returns dict with keys 'items' and 'total' (fallback to empty order on error).
-    """
-    logger.debug("DEBUG: ai_parse_order called with: %s", speech_text)
+def ai_parse_order(speech_text):
+    print("DEBUG: ai_parse_order called with:", speech_text)
 
     prompt = f"""
-You are a restaurant assistant. The available menu items (exact names) are:
-{json.dumps(list(menu.keys()))}
+You are a restaurant assistant. The menu items are: {list(menu.keys())}
 
 TASK:
-Convert the customer's speech into valid JSON only. The JSON must be a single object with this shape:
+Convert the customer's speech into valid JSON only:
 {{
   "items": [
-    {{"name": "string", "quantity": number}}
+    {{"name": string, "quantity": number}}
   ],
   "total": number
 }}
 
 RULES:
-- Only include items that exactly match the menu names (use "large fries" for synonyms like "big fries").
-- Use the exact menu prices below to compute the total.
-- If nothing is found, return items: [] and total: 0.
-- Output MUST be valid JSON only. NO explanation, NO markdown fences, NO code fences.
-
-Menu prices: {json.dumps(menu)}
+- Ignore items not in this menu.
+- "large fries" or "big fries" = "large fries".
+- Use exact menu prices: {json.dumps(menu)}
+- If nothing is found: items=[] and total=0.
+- MUST output only a JSON object. No backticks. No explanation.
 
 Customer said: "{speech_text}"
 """
 
-    # We'll also provide a JSON schema request to the API to encourage structured output.
-    response_schema = {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "quantity": {"type": "number"}
-                    },
-                    "required": ["name", "quantity"]
-                }
-            },
-            "total": {"type": "number"}
-        },
-        "required": ["items", "total"]
-    }
-
     try:
-        logger.debug("DEBUG: Sending prompt to OpenAI Responses API")
+        print("DEBUG: Sending prompt to OpenAI...")
 
-        # Use response_schema instead of the old 'response_format' param.
-        resp = openai_client.responses.create(
+        # ⭐ Modern Responses API with schema
+        completion = openai_client.responses.create(
             model="gpt-4o-mini",
             input=prompt,
-            response_schema=response_schema,
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "quantity": {"type": "number"}
+                            },
+                            "required": ["name", "quantity"]
+                        }
+                    },
+                    "total": {"type": "number"}
+                },
+                "required": ["items", "total"]
+            },
             temperature=0.0
         )
 
-        logger.debug("DEBUG RAW RESP: %s", resp)
+        print("DEBUG RAW COMPLETION:", completion)
 
-        # Try to extract the textual/JSON output from response objects
-        raw_text = extract_text_from_response(resp)
-        raw_text = raw_text or ""
-        raw_text = clean_json(raw_text)
+        # ⭐ NEW SDK automatically puts parsed JSON here
+        parsed = completion.output[0].content[0].value
+        print("DEBUG PARSED JSON:", parsed)
 
-        logger.debug("DEBUG RAW OPENAI TEXT (cleaned): %s", raw_text[:1000])
-
-        if not raw_text:
-            # If response_schema succeeded the SDK might have a 'output' structured field already
-            # Sometimes the responses.create may include parsed values under 'output_parsed' or 'output[0].content[0].payload'
-            # Attempt to find 'value' content in the structured response
-            try:
-                # some SDKs put parsed JSON into resp.output[0].content[0].value
-                if hasattr(resp, "output") and isinstance(resp.output, list):
-                    for block in resp.output:
-                        content = block.get("content") if isinstance(block, dict) else getattr(block, "content", None)
-                        if not content:
-                            continue
-                        for c in content:
-                            if isinstance(c, dict) and "value" in c:
-                                parsed = c["value"]
-                                logger.debug("Found structured parsed value in response: %s", parsed)
-                                if isinstance(parsed, dict):
-                                    return parsed
-            except Exception:
-                logger.exception("Secondary structured parse attempt failed")
-
-            logger.warning("No text extracted from OpenAI response; returning empty order")
-            return {"items": [], "total": 0}
-
-        # Try to parse JSON
-        parsed = json.loads(raw_text)
-        # Validate shape minimally
-        if "items" not in parsed or "total" not in parsed:
-            logger.warning("Parsed JSON missing expected keys, returning empty order: %s", parsed)
-            return {"items": [], "total": 0}
-
-        # Normalize items (ensure quantities are ints and names are lowercased to match menu keys)
-        normalized_items = []
-        for it in parsed.get("items", []):
-            try:
-                name = it.get("name", "").strip().lower()
-                if name == "big fries":
-                    name = "large fries"
-                if name not in menu:
-                    logger.debug("Ignoring unknown menu item from AI: %s", name)
-                    continue
-                qty = int(it.get("quantity", 0))
-                if qty <= 0:
-                    continue
-                normalized_items.append({"name": name, "quantity": qty})
-            except Exception:
-                logger.exception("Error normalizing item: %s", it)
-                continue
-
-        # If AI returned items but we filtered them all out, return empty order
-        if not normalized_items:
-            return {"items": [], "total": 0}
-
-        # Recalculate total using the canonical menu prices for safety
-        total = 0.0
-        for it in normalized_items:
-            total += menu[it["name"]] * it["quantity"]
-
-        result = {"items": normalized_items, "total": round(total, 2)}
-        logger.debug("AI parsed order result: %s", result)
-        return result
+        return parsed
 
     except Exception as e:
-        logger.exception("OpenAI error while parsing order: %s", e)
+        print("OpenAI error:", e)
         return {"items": [], "total": 0}
-
 
 # ---------------------------
 # Voice endpoints
