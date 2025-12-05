@@ -81,22 +81,46 @@ def clean_json(text: str) -> str:
     return text.strip()
 
 
+def normalize_speech(text: str) -> str:
+    """Normalize common mishearings and lowercase."""
+    text = text.lower()
+    text = text.replace("bagette", "baguette")
+    text = text.replace("chiken", "chicken")
+    text = text.replace("big fries", "large fries")
+    text = text.replace("coka", "coke")
+    text = text.replace("fantaa", "fanta")
+    return text.strip()
+
+
 # ---------------------------
-# AI parse order
+# AI parse order with aliases
 # ---------------------------
 def ai_parse_order(speech_text):
     """
     Send customer speech to OpenAI to extract a structured order.
+    Includes fuzzy matching / alias handling.
     Returns a dict: {"items": [...], "total": ...}
     """
-
     print("DEBUG: ai_parse_order called with:", speech_text)
+    
+    # Define menu aliases for GPT to help correct mishearing
+    aliases = {
+        "tuna baguette": ["tuna baguette", "tuna bagette"],
+        "chicken baguette": ["chicken baguette", "chiken baguette"],
+        "large fries": ["large fries", "big fries"],
+        "fries": ["fries", "small fries"],
+        "coke": ["coke", "coca cola", "coka"],
+        "fanta": ["fanta", "fantaa"]
+    }
 
     prompt = f"""
 You are a restaurant assistant. Extract the order from the customer's message.
 
 MENU ITEMS AND PRICES:
 {json.dumps(menu)}
+
+MENU ITEM ALIASES:
+{json.dumps(aliases)}
 
 TASK:
 Return ONLY valid JSON in this format:
@@ -110,7 +134,7 @@ Return ONLY valid JSON in this format:
 
 RULES:
 - Only include items from the menu.
-- Treat "big fries" or "large fries" as "large fries".
+- Try to match customer words to the closest menu item using aliases, even if slightly misspelled.
 - Multiply quantity by menu prices to compute total.
 - No explanations. No backticks. JSON only.
 
@@ -119,14 +143,12 @@ Customer said: "{speech_text}"
 
     try:
         print("DEBUG: Sending prompt to OpenAI...")
-
         completion = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
 
-        # Use attribute access (works on recent SDKs)
         ai_text = completion.choices[0].message.content
         print("DEBUG RAW OPENAI TEXT:", ai_text)
 
@@ -144,6 +166,7 @@ Customer said: "{speech_text}"
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0}
+
 
 # ---------------------------
 # Voice endpoints
@@ -164,13 +187,17 @@ def process_order():
     logger.debug("DEBUG: /process_order hit")
     resp = VoiceResponse()
 
-    speech_text = (request.form.get("SpeechResult") or "").strip()
+    raw_speech_text = (request.form.get("SpeechResult") or "")
     call_sid = request.form.get("CallSid")
-    logger.debug("DEBUG SpeechResult: %s, CallSid: %s", speech_text, call_sid)
+    logger.debug("DEBUG SpeechResult: %s, CallSid: %s", raw_speech_text, call_sid)
 
-    if not speech_text or not call_sid:
+    if not raw_speech_text or not call_sid:
         resp.say("Sorry, I did not understand.")
         return str(resp)
+
+    # Normalize mishearings before sending to AI
+    speech_text = normalize_speech(raw_speech_text)
+    logger.debug("DEBUG SpeechResult normalized: %s", speech_text)
 
     ai_order = ai_parse_order(speech_text)
     logger.debug("DEBUG AI ORDER: %s", ai_order)
@@ -180,13 +207,14 @@ def process_order():
         return str(resp)
 
     # store order by CallSid instead of session
-    orders_store[call_sid] = {"order": ai_order, "speech_text": speech_text}
+    orders_store[call_sid] = {"order": ai_order, "speech_text": raw_speech_text}
 
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order.get("total", 0.0)
 
     resp.say(
-        f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.",
+        f"I understood your order as: {summary}. Total is £{total:.2f}. "
+        "Say yes to confirm or no to cancel.",
         voice="alice"
     )
 
