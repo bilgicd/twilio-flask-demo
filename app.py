@@ -4,14 +4,21 @@ from twilio.rest import Client
 from openai import OpenAI
 import json, os
 
-# -------------------------
+# -------------------------------------------------
+# DEBUG: Show that environment variable exists
+# -------------------------------------------------
+print("DEBUG OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
+print("DEBUG TWILIO_ACCOUNT_SID =", os.getenv("TWILIO_ACCOUNT_SID"))
+print("DEBUG TWILIO_AUTH_TOKEN =", os.getenv("TWILIO_AUTH_TOKEN"))
+
+# -------------------------------------------------
 # OpenAI client
-# -------------------------
+# -------------------------------------------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# -------------------------
-# Menu & config
-# -------------------------
+# -------------------------------------------------
+# Menu config
+# -------------------------------------------------
 menu = {
     "tuna baguette": 4.99,
     "fries": 2.50,
@@ -27,17 +34,17 @@ app.secret_key = "mysuperlongrandomsecretkey123456789"
 FROM_NUMBER = 'whatsapp:+14155238886'
 TO_NUMBER = 'whatsapp:+447425766000'
 
-# -------------------------
-# Twilio client (using environment variables)
-# -------------------------
+# -------------------------------------------------
+# Twilio client
+# -------------------------------------------------
 client = Client(
     os.getenv("TWILIO_ACCOUNT_SID"),
     os.getenv("TWILIO_AUTH_TOKEN")
 )
 
-# -------------------------
-# Helpers
-# -------------------------
+# -------------------------------------------------
+# Send WhatsApp helper
+# -------------------------------------------------
 def send_whatsapp(text):
     msg = client.messages.create(
         from_=FROM_NUMBER,
@@ -47,7 +54,12 @@ def send_whatsapp(text):
     print("WhatsApp sent:", msg.sid)
 
 
+# -------------------------------------------------
+# AI Parse Order with DEBUG
+# -------------------------------------------------
 def ai_parse_order(speech_text):
+    print("DEBUG: ai_parse_order called with:", speech_text)
+
     prompt = f"""
 You are a restaurant assistant. The menu is: {list(menu.keys())}.
 Parse the customer's speech into JSON with fields:
@@ -68,24 +80,44 @@ Customer said: "{speech_text}"
 """
 
     try:
+        print("DEBUG: Sending prompt to OpenAI...")
+
         completion = openai_client.responses.create(
             model="gpt-4o-mini",
             input=[{"role": "user", "content": prompt}]
         )
 
-        content_text = completion.output[0].content[0].text.strip()
-        return json.loads(content_text)
+        print("DEBUG RAW COMPLETION:", completion)
+
+        # Try extracting text
+        text = None
+        try:
+            text = completion.output[0].content[0].text
+        except:
+            pass
+
+        if text is None:
+            try:
+                text = completion.output_text
+            except:
+                pass
+
+        print("DEBUG RAW OPENAI TEXT:", text)
+
+        return json.loads(text)
 
     except Exception as e:
         print("OpenAI error:", e)
-        return {"items": [], "total": 0.0}
+        return {"items": [], "total": 0}
 
 
-# -------------------------
-# Flask Routes
-# -------------------------
+# -------------------------------------------------
+# Voice route
+# -------------------------------------------------
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
+    print("DEBUG: /voice hit")
+
     resp = VoiceResponse()
     gather = Gather(
         input="speech",
@@ -99,27 +131,33 @@ def voice():
     return str(resp)
 
 
+# -------------------------------------------------
+# Process order route
+# -------------------------------------------------
 @app.route("/process_order", methods=["POST"])
 def process_order():
+    print("DEBUG: /process_order hit")
+
     resp = VoiceResponse()
     speech_text = request.form.get("SpeechResult", "")
+
+    print("DEBUG SpeechResult:", speech_text)
 
     if not speech_text:
         resp.say("Sorry, I did not understand.")
         return str(resp)
 
-    # Parse via OpenAI
     ai_order = ai_parse_order(speech_text)
+
+    print("DEBUG AI ORDER:", ai_order)
 
     if not ai_order["items"]:
         resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
-    # Save order in session for confirmation call
     session["order"] = ai_order
     session["speech_text"] = speech_text
 
-    # Build summary
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order["total"]
 
@@ -136,13 +174,19 @@ def process_order():
     return str(resp)
 
 
+# -------------------------------------------------
+# Confirm order route
+# -------------------------------------------------
 @app.route("/confirm_order", methods=["POST"])
 def confirm_order():
+    print("DEBUG: /confirm_order hit")
+
     resp = VoiceResponse()
     confirmation = request.form.get("SpeechResult", "").lower()
 
+    print("DEBUG USER CONFIRMATION:", confirmation)
+
     if confirmation in ["yes", "yeah", "yep", "confirm"]:
-        # Retrieve saved order
         ai_order = session.get("order")
         speech_text = session.get("speech_text")
 
@@ -153,7 +197,6 @@ def confirm_order():
         summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
         total = ai_order["total"]
 
-        # Send WhatsApp
         msg = f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}"
         send_whatsapp(msg)
 
@@ -163,9 +206,11 @@ def confirm_order():
 
     return str(resp)
 
-# -------------------------
-# Run
-# -------------------------
+
+# -------------------------------------------------
+# Run server
+# -------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    print(f"DEBUG Flask starting on port {port}")
     app.run(host="0.0.0.0", port=port)
