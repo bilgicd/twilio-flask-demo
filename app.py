@@ -2,10 +2,12 @@ from flask import Flask, request, session
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 from openai import OpenAI
-import json, base64, os
+import json, os
 
+# -------------------------
+# OpenAI client
+# -------------------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 
 # -------------------------
 # Menu & config
@@ -25,13 +27,13 @@ app.secret_key = "mysuperlongrandomsecretkey123456789"
 FROM_NUMBER = 'whatsapp:+14155238886'
 TO_NUMBER = 'whatsapp:+447425766000'
 
-# Twilio client
+# -------------------------
+# Twilio client (using environment variables)
+# -------------------------
 client = Client(
-    'AC717f3075970887837f943d9717f16558',
-    '414da7e86d4e46fee2f9008bc5ba4920'
+    os.getenv("TWILIO_ACCOUNT_SID"),
+    os.getenv("TWILIO_AUTH_TOKEN")
 )
-
-
 
 # -------------------------
 # Helpers
@@ -80,11 +82,9 @@ Customer said: "{speech_text}"
         print("OpenAI error:", e)
         return {"items": [], "total": 0.0}
 
-
 # -------------------------
 # Flask Routes
 # -------------------------
-
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
     resp = VoiceResponse()
@@ -163,7 +163,6 @@ def confirm_order():
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
 
     return str(resp)
-
 
 # -------------------------
 # Run
