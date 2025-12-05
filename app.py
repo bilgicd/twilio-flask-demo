@@ -48,7 +48,6 @@ def send_whatsapp(text):
 
 
 def ai_parse_order(speech_text):
-    """Send order text to OpenAI for parsing."""
     prompt = f"""
 You are a restaurant assistant. The menu is: {list(menu.keys())}.
 Parse the customer's speech into JSON with fields:
@@ -69,18 +68,18 @@ Customer said: "{speech_text}"
 """
 
     try:
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
+        completion = openai_client.responses.create(
+            model="gpt-4o-mini"
+            input=[{"role": "user", "content": prompt}]
         )
 
-        data = completion.choices[0].message.content.strip()
-        return json.loads(data)
+        content_text = completion.output[0].content[0].text.strip()
+        return json.loads(content_text)
 
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0.0}
+
 
 # -------------------------
 # Flask Routes
