@@ -134,10 +134,14 @@ def ai_parse_order(speech_text):
     print("DEBUG: ai_parse_order called with:", speech_text)
 
     prompt = f"""
-You are a restaurant assistant. The menu items are: {list(menu.keys())}
+You are a restaurant assistant. Extract the order from the customer's message.
+
+MENU ITEMS AND PRICES:
+{json.dumps(menu)}
 
 TASK:
-Convert the customer's speech into valid JSON only:
+Return ONLY valid JSON in this format:
+
 {{
   "items": [
     {{"name": string, "quantity": number}}
@@ -146,11 +150,10 @@ Convert the customer's speech into valid JSON only:
 }}
 
 RULES:
-- Ignore items not in this menu.
-- "large fries" or "big fries" = "large fries".
-- Use exact menu prices: {json.dumps(menu)}
-- If nothing is found: items=[] and total=0.
-- MUST output only a JSON object. No backticks. No explanation.
+- Only include items from the menu.
+- Treat "big fries" or "large fries" as "large fries".
+- Multiply quantity by menu prices to compute total.
+- No explanations. No backticks. JSON only.
 
 Customer said: "{speech_text}"
 """
@@ -158,42 +161,26 @@ Customer said: "{speech_text}"
     try:
         print("DEBUG: Sending prompt to OpenAI...")
 
-        # ⭐ Modern Responses API with schema
-        completion = openai_client.responses.create(
+        # WORKS ON ALL VERSIONS
+        completion = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            input=prompt,
-            response_schema={
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "quantity": {"type": "number"}
-                            },
-                            "required": ["name", "quantity"]
-                        }
-                    },
-                    "total": {"type": "number"}
-                },
-                "required": ["items", "total"]
-            },
-            temperature=0.0
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
         )
 
-        print("DEBUG RAW COMPLETION:", completion)
+        ai_text = completion.choices[0].message["content"]
+        print("DEBUG RAW OPENAI TEXT:", ai_text)
 
-        # ⭐ NEW SDK automatically puts parsed JSON here
-        parsed = completion.output[0].content[0].value
-        print("DEBUG PARSED JSON:", parsed)
+        # Remove accidental formatting
+        cleaned = clean_json(ai_text)
 
-        return parsed
+        # Parse JSON
+        return json.loads(cleaned)
 
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0}
+
 
 # ---------------------------
 # Voice endpoints
