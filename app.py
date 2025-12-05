@@ -8,9 +8,11 @@ import os
 import re
 import logging
 import string
+from metaphone import doublemetaphone
+import difflib
 
 # ---------------------------
-# Basic logging / debug
+# Logging
 # ---------------------------
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("baguette_app")
@@ -25,7 +27,7 @@ logger.debug("DEBUG TWILIO_AUTH_TOKEN = %s", bool(os.getenv("TWILIO_AUTH_TOKEN")
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------
-# Menu config
+# Menu
 # ---------------------------
 menu = {
     "tuna baguette": 4.99,
@@ -37,7 +39,7 @@ menu = {
 }
 
 # ---------------------------
-# Flask app and Twilio config
+# Flask app and Twilio
 # ---------------------------
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "mysuperlongrandomsecretkey123456789")
@@ -53,13 +55,12 @@ twilio_client = Client(
 # ---------------------------
 # In-memory store for orders keyed by CallSid
 # ---------------------------
-orders_store = {}  # key: CallSid, value: {"order": ..., "speech_text": ...}
+orders_store = {}
 
 # ---------------------------
 # Helpers
 # ---------------------------
 def send_whatsapp(text):
-    """Send a WhatsApp message via Twilio."""
     try:
         msg = twilio_client.messages.create(
             from_=FROM_NUMBER,
@@ -72,7 +73,6 @@ def send_whatsapp(text):
 
 
 def clean_json(text: str) -> str:
-    """Remove common markdown code fences and whitespace, returning raw JSON-like text."""
     if not text:
         return text
     text = text.strip()
@@ -82,7 +82,6 @@ def clean_json(text: str) -> str:
 
 
 def normalize_speech(text: str) -> str:
-    """Normalize common mishearings and lowercase."""
     text = text.lower()
     text = text.replace("bagette", "baguette")
     text = text.replace("chiken", "chicken")
@@ -92,28 +91,49 @@ def normalize_speech(text: str) -> str:
     return text.strip()
 
 
+def closest_menu_item(spoken_text, menu_items):
+    """Find the closest menu item using phonetic similarity."""
+    spoken_code = doublemetaphone(spoken_text)[0]
+    best_match = None
+    best_ratio = 0
+    for item in menu_items:
+        item_code = doublemetaphone(item)[0]
+        ratio = difflib.SequenceMatcher(None, spoken_code, item_code).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = item
+    return best_match if best_ratio > 0.6 else None  # threshold adjustable
+
+
 # ---------------------------
-# AI parse order with aliases
+# AI parse order
 # ---------------------------
 def ai_parse_order(speech_text):
-    """
-    Send customer speech to OpenAI to extract a structured order.
-    Includes fuzzy matching / alias handling.
-    Returns a dict: {"items": [...], "total": ...}
-    """
-    print("DEBUG: ai_parse_order called with:", speech_text)
-    
-    # Define menu aliases for GPT to help correct mishearing
-    aliases = {
-        "tuna baguette": ["tuna baguette", "tuna bagette"],
-        "chicken baguette": ["chicken baguette", "chiken baguette"],
-        "large fries": ["large fries", "big fries"],
-        "fries": ["fries", "small fries"],
-        "coke": ["coke", "coca cola", "coka"],
-        "fanta": ["fanta", "fantaa"]
-    }
+    """Send customer speech to OpenAI to extract structured order."""
+    logger.debug("DEBUG: ai_parse_order called with: %s", speech_text)
 
-    prompt = f"""
+    # First, try phonetic pre-match for menu items
+    matched_items = []
+    for item in menu.keys():
+        if item in speech_text:
+            matched_items.append(item)
+        else:
+            closest = closest_menu_item(speech_text, [item])
+            if closest:
+                matched_items.append(closest)
+
+    # If nothing matches, fallback to AI parsing
+    if not matched_items:
+        aliases = {
+            "tuna baguette": ["tuna baguette", "tuna bagette"],
+            "chicken baguette": ["chicken baguette", "chiken baguette"],
+            "large fries": ["large fries", "big fries"],
+            "fries": ["fries", "small fries"],
+            "coke": ["coke", "coca cola", "coka"],
+            "fanta": ["fanta", "fantaa"]
+        }
+
+        prompt = f"""
 You are a restaurant assistant. Extract the order from the customer's message.
 
 MENU ITEMS AND PRICES:
@@ -134,38 +154,33 @@ Return ONLY valid JSON in this format:
 
 RULES:
 - Only include items from the menu.
-- Try to match customer words to the closest menu item using aliases, even if slightly misspelled.
+- Try to match customer words to the closest menu item using aliases, even if slightly mispronounced or misheard.
 - Multiply quantity by menu prices to compute total.
 - No explanations. No backticks. JSON only.
 
 Customer said: "{speech_text}"
 """
+        try:
+            completion = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
+            ai_text = completion.choices[0].message.content
+            cleaned = clean_json(ai_text)
+            order_data = json.loads(cleaned)
+            return order_data
+        except Exception as e:
+            logger.exception("OpenAI error: %s", e)
+            return {"items": [], "total": 0}
 
-    try:
-        print("DEBUG: Sending prompt to OpenAI...")
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-
-        ai_text = completion.choices[0].message.content
-        print("DEBUG RAW OPENAI TEXT:", ai_text)
-
-        # Clean formatting / code fences
-        cleaned = clean_json(ai_text)
-
-        # Parse JSON
-        order_data = json.loads(cleaned)
-        return order_data
-
-    except json.JSONDecodeError as e:
-        print("JSON parsing error:", e)
-        return {"items": [], "total": 0}
-
-    except Exception as e:
-        print("OpenAI error:", e)
-        return {"items": [], "total": 0}
+    # Compute total for matched items
+    items = []
+    total = 0.0
+    for item in matched_items:
+        items.append({"name": item, "quantity": 1})
+        total += menu[item]
+    return {"items": items, "total": total}
 
 
 # ---------------------------
@@ -173,7 +188,6 @@ Customer said: "{speech_text}"
 # ---------------------------
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
-    logger.debug("DEBUG: /voice hit")
     resp = VoiceResponse()
     gather = Gather(input="speech", action="/process_order", method="POST", timeout=4)
     gather.say("Welcome to Baguette de Moet Andover. What would you like to order?")
@@ -184,67 +198,50 @@ def voice():
 
 @app.route("/process_order", methods=["POST"])
 def process_order():
-    logger.debug("DEBUG: /process_order hit")
     resp = VoiceResponse()
-
     raw_speech_text = (request.form.get("SpeechResult") or "")
     call_sid = request.form.get("CallSid")
-    logger.debug("DEBUG SpeechResult: %s, CallSid: %s", raw_speech_text, call_sid)
 
     if not raw_speech_text or not call_sid:
         resp.say("Sorry, I did not understand.")
         return str(resp)
 
-    # Normalize mishearings before sending to AI
     speech_text = normalize_speech(raw_speech_text)
-    logger.debug("DEBUG SpeechResult normalized: %s", speech_text)
+    logger.debug("Normalized speech: %s", speech_text)
 
     ai_order = ai_parse_order(speech_text)
-    logger.debug("DEBUG AI ORDER: %s", ai_order)
+    logger.debug("AI order: %s", ai_order)
 
     if not ai_order.get("items"):
-        resp.say("Sorry, I could not recognise any items from our menu.")
+        resp.say("Sorry, I could not recognize any items from our menu.")
         return str(resp)
 
-    # store order by CallSid instead of session
     orders_store[call_sid] = {"order": ai_order, "speech_text": raw_speech_text}
-
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order.get("total", 0.0)
 
     resp.say(
-        f"I understood your order as: {summary}. Total is £{total:.2f}. "
-        "Say yes to confirm or no to cancel.",
+        f"I understood your order as: {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.",
         voice="alice"
     )
 
     gather = Gather(input="speech", action="/confirm_order", method="POST", timeout=5)
     resp.append(gather)
     resp.say("No confirmation received. Goodbye.", voice="alice")
-
     return str(resp)
 
 
 @app.route("/confirm_order", methods=["POST"])
 def confirm_order():
-    logger.debug("DEBUG: /confirm_order hit")
     resp = VoiceResponse()
-
     call_sid = request.form.get("CallSid")
     confirmation_raw = (request.form.get("SpeechResult") or "")
-    logger.debug("DEBUG USER CONFIRMATION RAW: %s", confirmation_raw)
 
     if not call_sid or call_sid not in orders_store:
         resp.say("Sorry, we lost the order information.")
         return str(resp)
 
-    # Normalize confirmation: lowercase, strip punctuation and whitespace
-    confirmation = confirmation_raw.strip().lower()
-    confirmation = confirmation.translate(str.maketrans('', '', string.punctuation))
-    confirmation = confirmation.strip()
-    logger.debug("DEBUG USER CONFIRMATION NORMALIZED: %s", confirmation)
-
-    # Define accepted yes/no variants
+    confirmation = confirmation_raw.lower().translate(str.maketrans("", "", string.punctuation)).strip()
     yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative"]
     no_variants = ["no", "nah", "nope", "cancel", "negative"]
 
@@ -254,25 +251,19 @@ def confirm_order():
     if confirmation in yes_variants:
         summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in order_data["items"]])
         total = order_data["total"]
-
-        msg = f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}"
-        send_whatsapp(msg)
-
+        send_whatsapp(f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}")
         resp.say(f"Thank you! Your order of {summary} totaling £{total:.2f} has been sent to the kitchen.")
     elif confirmation in no_variants:
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
     else:
         resp.say("Sorry, I did not understand your response. Order cancelled.")
-        logger.debug("DEBUG: Unrecognized confirmation: %s", confirmation)
 
-    # Clean up stored order
     del orders_store[call_sid]
-
     return str(resp)
 
 
 # ---------------------------
-# Run the app
+# Run app
 # ---------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
