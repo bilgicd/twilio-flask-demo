@@ -2,14 +2,14 @@ from flask import Flask, request, session
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 from openai import OpenAI
-import json, os
+import json, os, re
 
 # -------------------------------------------------
-# DEBUG: Show that environment variable exists
+# DEBUG environment variables
 # -------------------------------------------------
-print("DEBUG OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
-print("DEBUG TWILIO_ACCOUNT_SID =", os.getenv("TWILIO_ACCOUNT_SID"))
-print("DEBUG TWILIO_AUTH_TOKEN =", os.getenv("TWILIO_AUTH_TOKEN"))
+print("DEBUG OPENAI_API_KEY =", bool(os.getenv("OPENAI_API_KEY")))
+print("DEBUG TWILIO_ACCOUNT_SID =", bool(os.getenv("TWILIO_ACCOUNT_SID")))
+print("DEBUG TWILIO_AUTH_TOKEN =", bool(os.getenv("TWILIO_AUTH_TOKEN")))
 
 # -------------------------------------------------
 # OpenAI client
@@ -55,26 +55,39 @@ def send_whatsapp(text):
 
 
 # -------------------------------------------------
-# AI Parse Order (ONLY FIXED PART)
+# Safe JSON cleaner (removes ```json ... ```)
+# -------------------------------------------------
+def clean_json(text):
+    text = text.strip()
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"```$", "", text)
+    return text.strip()
+
+
+# -------------------------------------------------
+# AI Parse Order (fully fixed)
 # -------------------------------------------------
 def ai_parse_order(speech_text):
     print("DEBUG: ai_parse_order called with:", speech_text)
 
     prompt = f"""
-You are a restaurant assistant. The menu is: {list(menu.keys())}.
-Parse the customer's speech into JSON with fields:
+You are a restaurant assistant. The menu items are: {list(menu.keys())}
 
-items: [
-  {{ "name": string, "quantity": number }}
-]
-total: number
+TASK:
+Convert the customer's speech into *valid JSON only*:
+{{
+  "items": [
+    {{"name": string, "quantity": number}}
+  ],
+  "total": number
+}}
 
-Rules:
-- Ignore items not on the menu.
-- "large fries" or "big fries" → "large fries".
-- Use these exact menu prices: {json.dumps(menu)}
-- If nothing is ordered, return items=[] and total=0.
-- Respond ONLY with JSON.
+RULES:
+- Ignore items not in this menu.
+- "large fries" or "big fries" = "large fries".
+- Use exact menu prices: {json.dumps(menu)}
+- If nothing is found: items=[] and total=0.
+- MUST output only a JSON object. No backticks. No explanation.
 
 Customer said: "{speech_text}"
 """
@@ -82,23 +95,25 @@ Customer said: "{speech_text}"
     try:
         print("DEBUG: Sending prompt to OpenAI...")
 
-        # ⭐ FIXED: Responses API requires raw text input, not role format
         completion = openai_client.responses.create(
             model="gpt-4o-mini",
+            response_format={"type": "json_object"},   # ⭐ forces pure JSON
             input=prompt
         )
 
         print("DEBUG RAW COMPLETION:", completion)
 
-        # ⭐ FIXED: All versions support output_text
-        text = completion.output_text  
-        print("DEBUG RAW OPENAI TEXT:", text)
+        # This is ALWAYS pure JSON now
+        ai_json = completion.output[0].content[0].text
+        print("DEBUG RAW OPENAI TEXT:", ai_json)
 
-        return json.loads(text)
+        # Parse JSON safely
+        return json.loads(ai_json)
 
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0}
+
 
 
 # -------------------------------------------------
@@ -127,8 +142,8 @@ def voice():
 @app.route("/process_order", methods=["POST"])
 def process_order():
     print("DEBUG: /process_order hit")
-
     resp = VoiceResponse()
+
     speech_text = request.form.get("SpeechResult", "").strip()
     print("DEBUG SpeechResult:", speech_text)
 
@@ -136,30 +151,24 @@ def process_order():
         resp.say("Sorry, I did not understand.")
         return str(resp)
 
-    # Parse order with AI
     ai_order = ai_parse_order(speech_text)
     print("DEBUG AI ORDER:", ai_order)
 
-    # Ensure ai_order has items
     if not ai_order.get("items"):
         resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
-    # Store in session for confirmation later
     session["order"] = ai_order
     session["speech_text"] = speech_text
 
-    # Build a readable summary
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order.get("total", 0)
 
-    if not summary:
-        summary = "I could not parse your order correctly."
+    resp.say(
+        f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.",
+        voice="alice"
+    )
 
-    # Speak the AI order first
-    resp.say(f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.", voice="alice")
-
-    # Then start Gather for confirmation
     gather = Gather(
         input="speech",
         action="/confirm_order",
@@ -167,9 +176,8 @@ def process_order():
         timeout=5
     )
     resp.append(gather)
-
-    # Fallback if no speech received
     resp.say("No confirmation received. Goodbye.", voice="alice")
+
     return str(resp)
 
 
@@ -180,10 +188,9 @@ def process_order():
 @app.route("/confirm_order", methods=["POST"])
 def confirm_order():
     print("DEBUG: /confirm_order hit")
-
     resp = VoiceResponse()
-    confirmation = request.form.get("SpeechResult", "").lower()
 
+    confirmation = request.form.get("SpeechResult", "").lower()
     print("DEBUG USER CONFIRMATION:", confirmation)
 
     if confirmation in ["yes", "yeah", "yep", "confirm"]:
@@ -212,6 +219,4 @@ def confirm_order():
 # Run server
 # -------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"DEBUG Flask starting on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000, debug=True)
