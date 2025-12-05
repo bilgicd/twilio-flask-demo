@@ -5,7 +5,7 @@ from openai import OpenAI
 import json, os
 
 # -------------------------------------------------
-# DEBUG: Check environment variables
+# DEBUG: Show that environment variable exists
 # -------------------------------------------------
 print("DEBUG OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
 print("DEBUG TWILIO_ACCOUNT_SID =", os.getenv("TWILIO_ACCOUNT_SID"))
@@ -31,30 +31,31 @@ menu = {
 app = Flask(__name__)
 app.secret_key = "mysuperlongrandomsecretkey123456789"
 
-FROM_NUMBER = "whatsapp:+14155238886"
-TO_NUMBER = "whatsapp:+447425766000"
+FROM_NUMBER = 'whatsapp:+14155238886'
+TO_NUMBER = 'whatsapp:+447425766000'
 
 # -------------------------------------------------
 # Twilio client
 # -------------------------------------------------
-twilio_client = Client(
+client = Client(
     os.getenv("TWILIO_ACCOUNT_SID"),
     os.getenv("TWILIO_AUTH_TOKEN")
 )
 
 # -------------------------------------------------
-# WhatsApp sender
+# Send WhatsApp helper
 # -------------------------------------------------
 def send_whatsapp(text):
-    msg = twilio_client.messages.create(
+    msg = client.messages.create(
         from_=FROM_NUMBER,
         body=text,
         to=TO_NUMBER
     )
     print("WhatsApp sent:", msg.sid)
 
+
 # -------------------------------------------------
-# AI Parse Order (fixed)
+# AI Parse Order (ONLY FIXED PART)
 # -------------------------------------------------
 def ai_parse_order(speech_text):
     print("DEBUG: ai_parse_order called with:", speech_text)
@@ -81,7 +82,7 @@ Customer said: "{speech_text}"
     try:
         print("DEBUG: Sending prompt to OpenAI...")
 
-        # *** FIXED: Responses API requires raw text input ***
+        # ⭐ FIXED: Responses API requires raw text input, not role format
         completion = openai_client.responses.create(
             model="gpt-4o-mini",
             input=prompt
@@ -89,16 +90,16 @@ Customer said: "{speech_text}"
 
         print("DEBUG RAW COMPLETION:", completion)
 
-        # Extract the model's text output
-        text = completion.output_text
+        # ⭐ FIXED: All versions support output_text
+        text = completion.output_text  
         print("DEBUG RAW OPENAI TEXT:", text)
 
-        # Parse JSON
         return json.loads(text)
 
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0}
+
 
 # -------------------------------------------------
 # Voice route
@@ -119,6 +120,7 @@ def voice():
     resp.say("We did not receive any speech. Goodbye.")
     return str(resp)
 
+
 # -------------------------------------------------
 # Process order route
 # -------------------------------------------------
@@ -128,6 +130,7 @@ def process_order():
 
     resp = VoiceResponse()
     speech_text = request.form.get("SpeechResult", "")
+
     print("DEBUG SpeechResult:", speech_text)
 
     if not speech_text:
@@ -135,13 +138,13 @@ def process_order():
         return str(resp)
 
     ai_order = ai_parse_order(speech_text)
+
     print("DEBUG AI ORDER:", ai_order)
 
     if not ai_order["items"]:
         resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
-    # Save order + speech to session
     session["order"] = ai_order
     session["speech_text"] = speech_text
 
@@ -160,6 +163,7 @@ def process_order():
     resp.say("No confirmation received. Goodbye.")
     return str(resp)
 
+
 # -------------------------------------------------
 # Confirm order route
 # -------------------------------------------------
@@ -169,6 +173,7 @@ def confirm_order():
 
     resp = VoiceResponse()
     confirmation = request.form.get("SpeechResult", "").lower()
+
     print("DEBUG USER CONFIRMATION:", confirmation)
 
     if confirmation in ["yes", "yeah", "yep", "confirm"]:
@@ -190,10 +195,3 @@ def confirm_order():
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
 
     return str(resp)
-
-# -------------------------------------------------
-# Run (local testing only)
-# -------------------------------------------------
-if __name__ == "__main__":
-    app.run(debug=True)
-
