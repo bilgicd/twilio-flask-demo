@@ -121,7 +121,7 @@ Customer said: "{speech_text}"
         print("DEBUG: Sending prompt to OpenAI...")
 
         completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
