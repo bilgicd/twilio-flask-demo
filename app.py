@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, request, session
+from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 from openai import OpenAI
@@ -7,6 +7,7 @@ import json
 import os
 import re
 import logging
+import string
 
 # ---------------------------
 # Basic logging / debug
@@ -50,6 +51,11 @@ twilio_client = Client(
 )
 
 # ---------------------------
+# In-memory store for orders keyed by CallSid
+# ---------------------------
+orders_store = {}  # key: CallSid, value: {"order": ..., "speech_text": ...}
+
+# ---------------------------
 # Helpers
 # ---------------------------
 def send_whatsapp(text):
@@ -70,61 +76,9 @@ def clean_json(text: str) -> str:
     if not text:
         return text
     text = text.strip()
-    # remove ```json or ``` or ```yaml fences at start
     text = re.sub(r"^```(?:json|yaml|txt|js)?\s*", "", text, flags=re.IGNORECASE)
-    # remove closing ```
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
-
-
-def extract_text_from_response(resp) -> str:
-    """
-    Try to extract textual output from various shapes the Responses API might return.
-    This is defensive: different SDK versions may return different structures.
-    """
-    # If the SDK object has an 'output_text' attribute (some SDKs provide it)
-    try:
-        if hasattr(resp, "output_text") and resp.output_text:
-            logger.debug("Using resp.output_text")
-            return resp.output_text
-    except Exception:
-        pass
-
-    # Try the typical nested structure resp.output -> list -> content -> list -> {type:text, text:...}
-    try:
-        if hasattr(resp, "output") and isinstance(resp.output, list) and resp.output:
-            for block in resp.output:
-                # block.content may be a list
-                content = block.get("content") if isinstance(block, dict) else getattr(block, "content", None)
-                if not content:
-                    continue
-                # content might be list of dicts or objects
-                for c in content:
-                    # c may be dict with 'text' or 'raw' fields or object with .text
-                    if isinstance(c, dict):
-                        if "text" in c and c["text"]:
-                            return c["text"]
-                        if "content" in c and isinstance(c["content"], str) and c["content"].strip():
-                            return c["content"]
-                    else:
-                        # try attribute access
-                        text = getattr(c, "text", None) or getattr(c, "content", None)
-                        if text:
-                            return text
-    except Exception:
-        logger.exception("Error while inspecting resp.output")
-
-    # Finally try to stringify resp and search for JSON block inside
-    try:
-        s = str(resp)
-        # try to find a JSON object in the string
-        m = re.search(r"(\{[\s\S]*\})", s)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
-
-    return ""
 
 
 # ---------------------------
@@ -211,9 +165,10 @@ def process_order():
     resp = VoiceResponse()
 
     speech_text = (request.form.get("SpeechResult") or "").strip()
-    logger.debug("DEBUG SpeechResult: %s", speech_text)
+    call_sid = request.form.get("CallSid")
+    logger.debug("DEBUG SpeechResult: %s, CallSid: %s", speech_text, call_sid)
 
-    if not speech_text:
+    if not speech_text or not call_sid:
         resp.say("Sorry, I did not understand.")
         return str(resp)
 
@@ -224,9 +179,8 @@ def process_order():
         resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
-    # store in session for later confirmation
-    session["order"] = ai_order
-    session["speech_text"] = speech_text
+    # store order by CallSid instead of session
+    orders_store[call_sid] = {"order": ai_order, "speech_text": speech_text}
 
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order.get("total", 0.0)
@@ -248,26 +202,43 @@ def confirm_order():
     logger.debug("DEBUG: /confirm_order hit")
     resp = VoiceResponse()
 
-    confirmation = (request.form.get("SpeechResult") or "").strip().lower()
-    logger.debug("DEBUG USER CONFIRMATION: %s", confirmation)
+    call_sid = request.form.get("CallSid")
+    confirmation_raw = (request.form.get("SpeechResult") or "")
+    logger.debug("DEBUG USER CONFIRMATION RAW: %s", confirmation_raw)
 
-    if confirmation in ["yes", "yeah", "yep", "confirm"]:
-        ai_order = session.get("order")
-        speech_text = session.get("speech_text")
+    if not call_sid or call_sid not in orders_store:
+        resp.say("Sorry, we lost the order information.")
+        return str(resp)
 
-        if not ai_order:
-            resp.say("Sorry, we lost the order information.")
-            return str(resp)
+    # Normalize confirmation: lowercase, strip punctuation and whitespace
+    confirmation = confirmation_raw.strip().lower()
+    confirmation = confirmation.translate(str.maketrans('', '', string.punctuation))
+    confirmation = confirmation.strip()
+    logger.debug("DEBUG USER CONFIRMATION NORMALIZED: %s", confirmation)
 
-        summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
-        total = ai_order["total"]
+    # Define accepted yes/no variants
+    yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative"]
+    no_variants = ["no", "nah", "nope", "cancel", "negative"]
+
+    order_data = orders_store[call_sid]["order"]
+    speech_text = orders_store[call_sid]["speech_text"]
+
+    if confirmation in yes_variants:
+        summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in order_data["items"]])
+        total = order_data["total"]
 
         msg = f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}"
         send_whatsapp(msg)
 
         resp.say(f"Thank you! Your order of {summary} totaling £{total:.2f} has been sent to the kitchen.")
-    else:
+    elif confirmation in no_variants:
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
+    else:
+        resp.say("Sorry, I did not understand your response. Order cancelled.")
+        logger.debug("DEBUG: Unrecognized confirmation: %s", confirmation)
+
+    # Clean up stored order
+    del orders_store[call_sid]
 
     return str(resp)
 
@@ -278,7 +249,3 @@ def confirm_order():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-    
-
-
