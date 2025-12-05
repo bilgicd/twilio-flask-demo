@@ -129,39 +129,49 @@ def process_order():
     print("DEBUG: /process_order hit")
 
     resp = VoiceResponse()
-    speech_text = request.form.get("SpeechResult", "")
-
+    speech_text = request.form.get("SpeechResult", "").strip()
     print("DEBUG SpeechResult:", speech_text)
 
     if not speech_text:
         resp.say("Sorry, I did not understand.")
         return str(resp)
 
+    # Parse order with AI
     ai_order = ai_parse_order(speech_text)
-
     print("DEBUG AI ORDER:", ai_order)
 
-    if not ai_order["items"]:
+    # Ensure ai_order has items
+    if not ai_order.get("items"):
         resp.say("Sorry, I could not recognise any items from our menu.")
         return str(resp)
 
+    # Store in session for confirmation later
     session["order"] = ai_order
     session["speech_text"] = speech_text
 
+    # Build a readable summary
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
-    total = ai_order["total"]
+    total = ai_order.get("total", 0)
 
+    if not summary:
+        summary = "I could not parse your order correctly."
+
+    # Speak the AI order first
+    resp.say(f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.", voice="alice")
+
+    # Then start Gather for confirmation
     gather = Gather(
         input="speech",
         action="/confirm_order",
         method="POST",
         timeout=5
     )
-    gather.say(f"You ordered {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.")
     resp.append(gather)
 
-    resp.say("No confirmation received. Goodbye.")
+    # Fallback if no speech received
+    resp.say("No confirmation received. Goodbye.", voice="alice")
     return str(resp)
+
 
 
 # -------------------------------------------------
