@@ -131,6 +131,11 @@ def extract_text_from_response(resp) -> str:
 # AI parse order
 # ---------------------------
 def ai_parse_order(speech_text):
+    """
+    Send customer speech to OpenAI to extract a structured order.
+    Returns a dict: {"items": [...], "total": ...}
+    """
+
     print("DEBUG: ai_parse_order called with:", speech_text)
 
     prompt = f"""
@@ -161,26 +166,30 @@ Customer said: "{speech_text}"
     try:
         print("DEBUG: Sending prompt to OpenAI...")
 
-        # WORKS ON ALL VERSIONS
         completion = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
 
-        ai_text = completion.choices[0].message["content"]
+        # Use attribute access (works on recent SDKs)
+        ai_text = completion.choices[0].message.content
         print("DEBUG RAW OPENAI TEXT:", ai_text)
 
-        # Remove accidental formatting
+        # Clean formatting / code fences
         cleaned = clean_json(ai_text)
 
         # Parse JSON
-        return json.loads(cleaned)
+        order_data = json.loads(cleaned)
+        return order_data
+
+    except json.JSONDecodeError as e:
+        print("JSON parsing error:", e)
+        return {"items": [], "total": 0}
 
     except Exception as e:
         print("OpenAI error:", e)
         return {"items": [], "total": 0}
-
 
 # ---------------------------
 # Voice endpoints
