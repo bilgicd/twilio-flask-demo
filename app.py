@@ -1,4 +1,4 @@
-# app.py - Production-ready Twilio + GPT-4o order system
+# app.py - Production-ready Twilio + GPT-4o voice ordering system
 
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -76,6 +76,7 @@ def normalize_speech(text: str) -> str:
     return text.strip()
 
 def ai_parse_order(speech_text):
+    """Parse customer order using GPT-4o, with expanded aliases."""
     aliases = {
         "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit"],
         "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette"],
@@ -105,7 +106,7 @@ Return ONLY valid JSON in this format:
 
 RULES:
 - Only include items from the menu.
-- Match customer words to the closest menu item using aliases.
+- Match customer words to the closest menu item using aliases, even if slightly mispronounced.
 - Multiply quantity by menu prices to compute total.
 - No explanations. JSON only.
 
