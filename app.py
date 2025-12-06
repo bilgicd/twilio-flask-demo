@@ -1,4 +1,4 @@
-# app.py - Production-ready Twilio + GPT-4o voice ordering system
+# app.py - High-accuracy Twilio + GPT-4o voice ordering system
 
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -9,6 +9,7 @@ import os
 import logging
 import string
 import difflib
+import re
 
 # ---------------------------
 # Logging
@@ -25,7 +26,7 @@ TWILIO_FROM = os.getenv("TWILIO_FROM", "whatsapp:+14155238886")
 TWILIO_TO = os.getenv("TWILIO_TO", "whatsapp:+447425766000")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "supersecretkey123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://twilio-flask-demo-production.up.railway.app")  # Your public URL
+BASE_URL = os.getenv("BASE_URL", "https://twilio-flask-demo-production.up.railway.app")
 
 # ---------------------------
 # Clients
@@ -75,8 +76,16 @@ def normalize_speech(text: str) -> str:
     text = text.replace("fantaa", "fanta")
     return text.strip()
 
-def ai_parse_order(speech_text):
-    """Parse customer order using GPT-4o, with expanded aliases."""
+def clean_json(text: str) -> str:
+    if not text:
+        return text
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+def ai_parse_order(speech_text: str) -> dict:
+    """Parse customer speech with GPT-4o, return structured order."""
     aliases = {
         "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit"],
         "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette"],
@@ -119,10 +128,11 @@ Customer said: "{speech_text}"
             temperature=0
         )
         ai_text = completion.choices[0].message.content
-        order_data = json.loads(ai_text)
+        cleaned_text = clean_json(ai_text)
+        order_data = json.loads(cleaned_text)
         return order_data
     except Exception as e:
-        logger.exception(f"OpenAI error: {e}")
+        logger.exception(f"OpenAI parsing error: {e}")
         return {"items": [], "total": 0}
 
 def match_confirmation(text, variants):
