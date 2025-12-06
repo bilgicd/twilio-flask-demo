@@ -1,4 +1,4 @@
-# app.py - Production-ready version with full URLs for Twilio webhooks
+# app.py - Production-ready Twilio + GPT-4o order system
 
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -8,7 +8,6 @@ import json
 import os
 import logging
 import string
-import requests
 import difflib
 
 # ---------------------------
@@ -47,7 +46,7 @@ menu = {
 }
 
 # ---------------------------
-# Flask App
+# Flask app
 # ---------------------------
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -60,7 +59,6 @@ orders_store = {}
 # ---------------------------
 # Helpers
 # ---------------------------
-
 def send_whatsapp(text):
     try:
         msg = twilio_client.messages.create(from_=TWILIO_FROM, body=text, to=TWILIO_TO)
@@ -79,11 +77,11 @@ def normalize_speech(text: str) -> str:
 
 def ai_parse_order(speech_text):
     aliases = {
-        "tuna baguette": ["tuna baguette", "tuna bagette"],
-        "chicken baguette": ["chicken baguette", "chiken baguette"],
-        "large fries": ["large fries", "big fries"],
+        "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit"],
+        "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette"],
+        "large fries": ["large fries", "big fries", "big friez"],
         "fries": ["fries", "small fries"],
-        "coke": ["coke", "coca cola", "coka"],
+        "coke": ["coke", "coca cola", "coka", "cok"],
         "fanta": ["fanta", "fantaa"]
     }
 
@@ -113,7 +111,6 @@ RULES:
 
 Customer said: "{speech_text}"
 """
-    
     try:
         completion = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -132,8 +129,11 @@ def match_confirmation(text, variants):
     return best_match[0] if best_match else None
 
 # ---------------------------
-# Voice endpoints
+# Routes
 # ---------------------------
+@app.route("/")
+def index():
+    return "Baguette de Moet Voice Ordering System is running."
 
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
@@ -154,19 +154,12 @@ def voice():
 def process_order():
     resp = VoiceResponse()
     call_sid = request.form.get("CallSid")
-    recording_url = request.form.get("RecordingUrl")
+    raw_speech_text = request.form.get("SpeechResult", "")
 
-    if not recording_url or not call_sid:
+    if not raw_speech_text or not call_sid:
         resp.say("Sorry, we did not receive your order.")
         return str(resp)
 
-    audio = requests.get(recording_url + ".wav").content
-
-    transcription = openai_client.audio.transcriptions.create(
-        model="gpt-4o-mini-transcribe",
-        file=("audio.wav", audio, "audio/wav")
-    )
-    raw_speech_text = transcription.text
     speech_text = normalize_speech(raw_speech_text)
     logger.debug(f"Normalized speech: {speech_text}")
 
@@ -203,12 +196,10 @@ def confirm_order():
         return str(resp)
 
     confirmation_clean = confirmation_raw.lower().translate(str.maketrans("", "", string.punctuation)).strip()
-
     yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative", "correct", "right"]
     no_variants = ["no", "nah", "nope", "cancel", "negative", "wrong"]
 
     matched = match_confirmation(confirmation_clean, yes_variants + no_variants)
-
     order_data = orders_store[call_sid]["order"]
     speech_text = orders_store[call_sid]["speech_text"]
 
