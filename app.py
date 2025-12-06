@@ -1,4 +1,4 @@
-# app.py - High-accuracy version using Twilio + OpenAI Whisper + Fuzzy Confirmation Handling
+# app.py - Production-ready version with full URLs for Twilio webhooks
 
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -26,6 +26,7 @@ TWILIO_FROM = os.getenv("TWILIO_FROM", "whatsapp:+14155238886")
 TWILIO_TO = os.getenv("TWILIO_TO", "whatsapp:+447425766000")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "supersecretkey123")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BASE_URL = os.getenv("BASE_URL", "https://twilio-flask-demo-production.up.railway.app")  # Your public URL
 
 # ---------------------------
 # Clients
@@ -137,7 +138,13 @@ def match_confirmation(text, variants):
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
     resp = VoiceResponse()
-    gather = Gather(input="speech", action="/process_order", method="POST", timeout=4, finish_on_key="#")
+    gather = Gather(
+        input="speech",
+        action=f"{BASE_URL}/process_order",
+        method="POST",
+        timeout=4,
+        finish_on_key="#"
+    )
     gather.say("Welcome to Baguette de Moet Andover. Please say your order after the beep. Press # when finished.")
     resp.append(gather)
     resp.say("We did not receive any speech. Goodbye.")
@@ -155,7 +162,6 @@ def process_order():
 
     audio = requests.get(recording_url + ".wav").content
 
-    # Transcribe using Whisper
     transcription = openai_client.audio.transcriptions.create(
         model="gpt-4o-mini-transcribe",
         file=("audio.wav", audio, "audio/wav")
@@ -176,7 +182,12 @@ def process_order():
     total = ai_order.get("total", 0.0)
 
     resp.say(f"I understood your order as: {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.")
-    gather = Gather(input="speech", action="/confirm_order", method="POST", timeout=5)
+    gather = Gather(
+        input="speech",
+        action=f"{BASE_URL}/confirm_order",
+        method="POST",
+        timeout=5
+    )
     resp.append(gather)
     resp.say("No confirmation received. Goodbye.")
     return str(resp)
@@ -191,10 +202,8 @@ def confirm_order():
         resp.say("Sorry, we lost the order information.")
         return str(resp)
 
-    # Normalize and remove punctuation
     confirmation_clean = confirmation_raw.lower().translate(str.maketrans("", "", string.punctuation)).strip()
 
-    # Expanded variants for fuzzy matching
     yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative", "correct", "right"]
     no_variants = ["no", "nah", "nope", "cancel", "negative", "wrong"]
 
@@ -211,9 +220,13 @@ def confirm_order():
     elif matched in no_variants:
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
     else:
-        # Ambiguous response, ask for clarification
         resp.say("Sorry, I did not understand your response. Please say yes or no to confirm your order.")
-        gather = Gather(input="speech", action="/confirm_order", method="POST", timeout=5)
+        gather = Gather(
+            input="speech",
+            action=f"{BASE_URL}/confirm_order",
+            method="POST",
+            timeout=5
+        )
         resp.append(gather)
         return str(resp)
 
