@@ -39,11 +39,11 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 # ---------------------------
 menu = {
     "tuna baguette": 4.99,
+    "chicken baguette": 5.99,
     "fries": 2.50,
     "large fries": 3.00,
     "coke": 1.20,
-    "fanta": 1.20,
-    "chicken baguette": 5.99
+    "fanta": 1.20
 }
 
 # ---------------------------
@@ -58,6 +58,18 @@ app.secret_key = FLASK_SECRET_KEY
 orders_store = {}
 
 # ---------------------------
+# Aliases (expanded)
+# ---------------------------
+aliases = {
+    "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit", "tunna baguette", "tuna bag", "tuna", "tune baguette"],
+    "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette", "chikn bagit", "chicken bag", "chik baguette", "chikn baguette"],
+    "large fries": ["large fries", "big fries", "big friez", "large fry", "big fry", "fries large", "frie large"],
+    "fries": ["fries", "small fries", "frie", "friez", "little fries", "small fry"],
+    "coke": ["coke", "coca cola", "coka", "coak", "cok", "cokes", "cola"],
+    "fanta": ["fanta", "fantaa", "fentah", "fentea", "fantar", "fantee"]
+}
+
+# ---------------------------
 # Helpers
 # ---------------------------
 def send_whatsapp(text):
@@ -68,12 +80,31 @@ def send_whatsapp(text):
         logger.exception(f"Failed to send WhatsApp message: {e}")
 
 def normalize_speech(text: str) -> str:
+    """
+    Normalize common mispronunciations and accent-driven variations.
+    """
     text = text.lower()
-    text = text.replace("bagette", "baguette")
-    text = text.replace("chiken", "chicken")
-    text = text.replace("big fries", "large fries")
-    text = text.replace("coka", "coke")
-    text = text.replace("fantaa", "fanta")
+    replacements = {
+        "bagette": "baguette",
+        "bagit": "baguette",
+        "chiken": "chicken",
+        "chiggin": "chicken",
+        "chikn": "chicken",
+        "tunna": "tuna",
+        "big fries": "large fries",
+        "big friez": "large fries",
+        "friez": "fries",
+        "frie": "fries",
+        "coka": "coke",
+        "coak": "coke",
+        "cok": "coke",
+        "fentah": "fanta",
+        "fantaa": "fanta",
+        "fantee": "fanta",
+        "fentar": "fanta"
+    }
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
     return text.strip()
 
 def clean_json(text: str) -> str:
@@ -85,16 +116,9 @@ def clean_json(text: str) -> str:
     return text.strip()
 
 def ai_parse_order(speech_text: str) -> dict:
-    """Parse customer speech with GPT-4o, return structured order."""
-    aliases = {
-        "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit"],
-        "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette"],
-        "large fries": ["large fries", "big fries", "big friez"],
-        "fries": ["fries", "small fries"],
-        "coke": ["coke", "coca cola", "coka", "cok"],
-        "fanta": ["fanta", "fantaa"]
-    }
-
+    """
+    Parse customer speech with GPT-4o, return structured order.
+    """
     prompt = f"""
 You are a restaurant assistant. Extract the order from the customer's message.
 
@@ -153,10 +177,10 @@ def voice():
         input="speech",
         action=f"{BASE_URL}/process_order",
         method="POST",
-        timeout=4,
-        finish_on_key="#"
+        timeout=8,  # long enough for multiple items
+        language="en-GB"
     )
-    gather.say("Welcome to Baguette de Moet Andover. Please say your order after the beep. Press # when finished.")
+    gather.say("Welcome to Baguette de Moet Andover. Please speak your order clearly after the beep.")
     resp.append(gather)
     resp.say("We did not receive any speech. Goodbye.")
     return str(resp)
@@ -181,16 +205,21 @@ def process_order():
         resp.say("Sorry, I could not recognize any items from our menu.")
         return str(resp)
 
+    # Store order
     orders_store[call_sid] = {"order": ai_order, "speech_text": raw_speech_text}
+
     summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
     total = ai_order.get("total", 0.0)
 
-    resp.say(f"I understood your order as: {summary}. Total is £{total:.2f}. Say yes to confirm or no to cancel.")
+    resp.say(f"I understood your order as: {summary}. Total is £{total:.2f}. Please say yes to confirm or no to cancel.")
+
+    # Gather confirmation without #
     gather = Gather(
         input="speech",
         action=f"{BASE_URL}/confirm_order",
         method="POST",
-        timeout=5
+        timeout=6,
+        language="en-GB"
     )
     resp.append(gather)
     resp.say("No confirmation received. Goodbye.")
@@ -206,6 +235,18 @@ def confirm_order():
         resp.say("Sorry, we lost the order information.")
         return str(resp)
 
+    if not confirmation_raw:
+        resp.say("Sorry, I did not hear your response. Please say yes or no to confirm your order.")
+        gather = Gather(
+            input="speech",
+            action=f"{BASE_URL}/confirm_order",
+            method="POST",
+            timeout=6,
+            language="en-GB"
+        )
+        resp.append(gather)
+        return str(resp)
+
     confirmation_clean = confirmation_raw.lower().translate(str.maketrans("", "", string.punctuation)).strip()
     yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative", "correct", "right"]
     no_variants = ["no", "nah", "nope", "cancel", "negative", "wrong"]
@@ -219,20 +260,23 @@ def confirm_order():
         total = order_data["total"]
         send_whatsapp(f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}")
         resp.say(f"Thank you! Your order of {summary} totaling £{total:.2f} has been sent to the kitchen.")
+        del orders_store[call_sid]
+
     elif matched in no_variants:
         resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
+        del orders_store[call_sid]
+
     else:
         resp.say("Sorry, I did not understand your response. Please say yes or no to confirm your order.")
         gather = Gather(
             input="speech",
             action=f"{BASE_URL}/confirm_order",
             method="POST",
-            timeout=5
+            timeout=6,
+            language="en-GB"
         )
         resp.append(gather)
-        return str(resp)
 
-    del orders_store[call_sid]
     return str(resp)
 
 # ---------------------------
