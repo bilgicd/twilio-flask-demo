@@ -1,15 +1,13 @@
-# app.py - High-accuracy Twilio + GPT-4o voice ordering system
-
 from flask import Flask, request
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 from openai import OpenAI
-import json
 import os
+import json
 import logging
-import string
-import difflib
 import re
+import string
+import jellyfish
 
 # ---------------------------
 # Logging
@@ -18,15 +16,14 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("baguette_app")
 
 # ---------------------------
-# Environment variables
+# Environment
 # ---------------------------
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_FROM = os.getenv("TWILIO_FROM", "whatsapp:+14155238886")
-TWILIO_TO = os.getenv("TWILIO_TO", "whatsapp:+447425766000")
-FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "supersecretkey123")
+TWILIO_FROM = os.getenv("TWILIO_FROM")
+TWILIO_TO = os.getenv("TWILIO_TO")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://twilio-flask-demo-production.up.railway.app")
+BASE_URL = os.getenv("BASE_URL")
 
 # ---------------------------
 # Clients
@@ -35,9 +32,15 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------------------
+# App
+# ---------------------------
+app = Flask(__name__)
+orders_store = {}
+
+# ---------------------------
 # Menu
 # ---------------------------
-menu = {
+MENU = {
     "tuna baguette": 4.99,
     "chicken baguette": 5.99,
     "fries": 2.50,
@@ -46,242 +49,157 @@ menu = {
     "fanta": 1.20
 }
 
-# ---------------------------
-# Flask app
-# ---------------------------
-app = Flask(__name__)
-app.secret_key = FLASK_SECRET_KEY
-
-# ---------------------------
-# In-memory order store
-# ---------------------------
-orders_store = {}
-
-# ---------------------------
-# Aliases (expanded)
-# ---------------------------
-aliases = {
-    "tuna baguette": ["tuna baguette", "tuna bagette", "tuna bagit", "tunna baguette", "tuna bag", "tuna", "tune baguette"],
-    "chicken baguette": ["chicken baguette", "chiken baguette", "chiggin baguette", "chikn bagit", "chicken bag", "chik baguette", "chikn baguette"],
-    "large fries": ["large fries", "big fries", "big friez", "large fry", "big fry", "fries large", "frie large"],
-    "fries": ["fries", "small fries", "frie", "friez", "little fries", "small fry"],
-    "coke": ["coke", "coca cola", "coka", "coak", "cok", "cokes", "cola"],
-    "fanta": ["fanta", "fantaa", "fentah", "fentea", "fantar", "fantee"]
+# Precompute phonetic keys
+PHONETIC_MENU = {
+    item: jellyfish.soundex(item)
+    for item in MENU
 }
 
 # ---------------------------
 # Helpers
 # ---------------------------
 def send_whatsapp(text):
-    try:
-        msg = twilio_client.messages.create(from_=TWILIO_FROM, body=text, to=TWILIO_TO)
-        logger.debug(f"WhatsApp sent: {msg.sid}")
-    except Exception as e:
-        logger.exception(f"Failed to send WhatsApp message: {e}")
+    twilio_client.messages.create(from_=TWILIO_FROM, to=TWILIO_TO, body=text)
 
-def normalize_speech(text: str) -> str:
-    """
-    Normalize common mispronunciations and accent-driven variations.
-    """
+def normalize_text(text: str) -> str:
     text = text.lower()
+    text = re.sub(r"[^\w\s]", "", text)
     replacements = {
-        "bagette": "baguette",
-        "bagit": "baguette",
-        "chiken": "chicken",
-        "chiggin": "chicken",
-        "chikn": "chicken",
-        "tunna": "tuna",
-        "big fries": "large fries",
-        "big friez": "large fries",
-        "friez": "fries",
-        "frie": "fries",
-        "coka": "coke",
-        "coak": "coke",
-        "cok": "coke",
-        "fentah": "fanta",
-        "fantaa": "fanta",
-        "fantee": "fanta",
-        "fentar": "fanta"
+        "chips": "fries",
+        "cook": "coke",
+        "price": "fries",
+        "bag get": "baguette",
+        "baguete": "baguette",
+        "two": "tuna"
     }
-    for wrong, correct in replacements.items():
-        text = text.replace(wrong, correct)
+    for k, v in replacements.items():
+        text = text.replace(k, v)
     return text.strip()
 
-def clean_json(text: str) -> str:
-    if not text:
-        return text
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+def phonetic_match(text: str):
+    """
+    Match speech text to closest menu item using phonetics.
+    """
+    text_code = jellyfish.soundex(text)
+    best_match = None
+    best_score = 0
 
-def ai_parse_order(speech_text: str) -> dict:
-    """
-    Parse customer speech with GPT-4o, return structured order.
-    """
+    for item, item_code in PHONETIC_MENU.items():
+        score = jellyfish.jaro_similarity(text_code, item_code)
+        if score > best_score:
+            best_match = item
+            best_score = score
+
+    return best_match if best_score > 0.75 else None
+
+def ai_parse_order(text: str):
     prompt = f"""
-You are a restaurant assistant. Extract the order from the customer's message.
+You are a voice ordering assistant.
 
-MENU ITEMS AND PRICES:
-{json.dumps(menu)}
-
-MENU ITEM ALIASES:
-{json.dumps(aliases)}
-
-TASK:
-Return ONLY valid JSON in this format:
-{{
-  "items": [
-    {{"name": string, "quantity": number}}
-  ],
-  "total": number
-}}
+MENU:
+{json.dumps(MENU)}
 
 RULES:
-- Only include items from the menu.
-- Match customer words to the closest menu item using aliases, even if slightly mispronounced.
-- Multiply quantity by menu prices to compute total.
-- No explanations. JSON only.
+- Infer intent even if words are misheard or phonetically similar
+- UK English (chips = fries)
+- Return JSON only
 
-Customer said: "{speech_text}"
+FORMAT:
+{{
+  "items": [{{"name": string, "quantity": number}}],
+  "confidence": number
+}}
+
+Customer said:
+"{text}"
 """
+
     try:
-        completion = openai_client.chat.completions.create(
+        r = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        ai_text = completion.choices[0].message.content
-        cleaned_text = clean_json(ai_text)
-        order_data = json.loads(cleaned_text)
-        return order_data
+        return json.loads(r.choices[0].message.content)
     except Exception as e:
-        logger.exception(f"OpenAI parsing error: {e}")
-        return {"items": [], "total": 0}
-
-def match_confirmation(text, variants):
-    best_match = difflib.get_close_matches(text, variants, n=1, cutoff=0.7)
-    return best_match[0] if best_match else None
+        logger.exception("GPT failed")
+        return {"items": [], "confidence": 0}
 
 # ---------------------------
 # Routes
 # ---------------------------
-@app.route("/")
-def index():
-    return "Baguette de Moet Voice Ordering System is running."
-
-@app.route("/voice", methods=["GET", "POST"])
+@app.route("/voice", methods=["POST", "GET"])
 def voice():
     resp = VoiceResponse()
     gather = Gather(
         input="speech",
-        action=f"{BASE_URL}/process_order",
-        method="POST",
-        timeout=8,  # long enough for multiple items
-        language="en-GB"
+        action=f"{BASE_URL}/process",
+        timeout=8,
+        language="en-GB",
+        hints=list(MENU.keys())
     )
-    gather.say("Welcome to Baguette de Moet Andover. Please speak your order clearly after the beep.")
+    gather.say("Welcome to Baguette de Moet. Please tell me your order.")
     resp.append(gather)
-    resp.say("We did not receive any speech. Goodbye.")
     return str(resp)
 
-@app.route("/process_order", methods=["POST"])
-def process_order():
+@app.route("/process", methods=["POST"])
+def process():
     resp = VoiceResponse()
     call_sid = request.form.get("CallSid")
-    raw_speech_text = request.form.get("SpeechResult", "")
+    speech = request.form.get("SpeechResult", "")
 
-    if not raw_speech_text or not call_sid:
-        resp.say("Sorry, we did not receive your order.")
+    if not speech:
+        resp.say("Sorry, I did not hear anything.")
         return str(resp)
 
-    speech_text = normalize_speech(raw_speech_text)
-    logger.debug(f"Normalized speech: {speech_text}")
+    normalized = normalize_text(speech)
+    logger.debug(f"Normalized: {normalized}")
 
-    ai_order = ai_parse_order(speech_text)
-    logger.debug(f"AI order: {ai_order}")
+    # Try phonetic match first
+    phonetic_item = phonetic_match(normalized)
 
-    if not ai_order.get("items"):
-        resp.say("Sorry, I could not recognize any items from our menu.")
-        return str(resp)
+    if phonetic_item:
+        orders_store[call_sid] = {
+            "items": [{"name": phonetic_item, "quantity": 1}]
+        }
+    else:
+        ai_result = ai_parse_order(normalized)
+        if not ai_result["items"]:
+            resp.say("I didn't quite get that. Did you want tuna baguette or chicken baguette?")
+            return str(resp)
+        orders_store[call_sid] = ai_result
 
-    # Store order
-    orders_store[call_sid] = {"order": ai_order, "speech_text": raw_speech_text}
+    items = orders_store[call_sid]["items"]
+    summary = ", ".join(f"{i['quantity']} {i['name']}" for i in items)
+    resp.say(f"I heard {summary}. Please say yes to confirm or no to cancel.")
 
-    summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in ai_order["items"]])
-    total = ai_order.get("total", 0.0)
-
-    resp.say(f"I understood your order as: {summary}. Total is £{total:.2f}. Please say yes to confirm or no to cancel.")
-
-    # Gather confirmation without #
     gather = Gather(
         input="speech",
-        action=f"{BASE_URL}/confirm_order",
-        method="POST",
-        timeout=6,
+        action=f"{BASE_URL}/confirm",
+        timeout=5,
         language="en-GB"
     )
     resp.append(gather)
-    resp.say("No confirmation received. Goodbye.")
     return str(resp)
 
-@app.route("/confirm_order", methods=["POST"])
-def confirm_order():
+@app.route("/confirm", methods=["POST"])
+def confirm():
     resp = VoiceResponse()
     call_sid = request.form.get("CallSid")
-    confirmation_raw = request.form.get("SpeechResult", "")
+    speech = request.form.get("SpeechResult", "").lower()
 
-    if not call_sid or call_sid not in orders_store:
-        resp.say("Sorry, we lost the order information.")
-        return str(resp)
-
-    if not confirmation_raw:
-        resp.say("Sorry, I did not hear your response. Please say yes or no to confirm your order.")
-        gather = Gather(
-            input="speech",
-            action=f"{BASE_URL}/confirm_order",
-            method="POST",
-            timeout=6,
-            language="en-GB"
-        )
-        resp.append(gather)
-        return str(resp)
-
-    confirmation_clean = confirmation_raw.lower().translate(str.maketrans("", "", string.punctuation)).strip()
-    yes_variants = ["yes", "yeah", "yep", "confirm", "sure", "ok", "okay", "affirmative", "correct", "right"]
-    no_variants = ["no", "nah", "nope", "cancel", "negative", "wrong"]
-
-    matched = match_confirmation(confirmation_clean, yes_variants + no_variants)
-    order_data = orders_store[call_sid]["order"]
-    speech_text = orders_store[call_sid]["speech_text"]
-
-    if matched in yes_variants:
-        summary = ", ".join([f"{i['quantity']} x {i['name']}" for i in order_data["items"]])
-        total = order_data["total"]
-        send_whatsapp(f"New Order: {summary}. Total £{total:.2f}. Original speech: {speech_text}")
-        resp.say(f"Thank you! Your order of {summary} totaling £{total:.2f} has been sent to the kitchen.")
-        del orders_store[call_sid]
-
-    elif matched in no_variants:
-        resp.say("Order cancelled. Thank you for calling Baguette de Moet Andover.")
-        del orders_store[call_sid]
-
+    if "yes" in speech:
+        items = orders_store.pop(call_sid)["items"]
+        total = sum(MENU[i["name"]] * i["quantity"] for i in items)
+        send_whatsapp(f"Order: {items} | Total £{total:.2f}")
+        resp.say("Thank you. Your order has been placed.")
     else:
-        resp.say("Sorry, I did not understand your response. Please say yes or no to confirm your order.")
-        gather = Gather(
-            input="speech",
-            action=f"{BASE_URL}/confirm_order",
-            method="POST",
-            timeout=6,
-            language="en-GB"
-        )
-        resp.append(gather)
+        resp.say("Order cancelled.")
 
     return str(resp)
 
 # ---------------------------
-# Run app
+# Run
 # ---------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
