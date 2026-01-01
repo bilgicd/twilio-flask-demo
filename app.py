@@ -23,7 +23,7 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM = os.getenv("TWILIO_FROM")
 TWILIO_TO = os.getenv("TWILIO_TO")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("BASE_URL")
+BASE_URL = os.getenv("BASE_URL", "https://twilio-flask-demo-production.up.railway.app")
 
 # ---------------------------
 # Clients
