@@ -165,7 +165,7 @@ def process():
     else:
         ai_result = ai_parse_order(normalized)
         if not ai_result["items"]:
-            resp.say("I didn't quite get that. Did you want tuna baguette or chicken baguette?")
+            resp.say("I didn't quite get that")
             return str(resp)
         orders_store[call_sid] = ai_result
 
@@ -176,7 +176,7 @@ def process():
     gather = Gather(
         input="speech",
         action=f"{BASE_URL}/confirm",
-        timeout=5,
+        timeout=4,
         language="en-GB"
     )
     resp.append(gather)
